@@ -83,6 +83,7 @@ button.chip{border:0;font-family:inherit}
 .in{width:100%;height:42px;border:1px solid var(--line);border-radius:10px;background:#fff;text-align:center;font:inherit;font-size:16px;font-weight:650;color:var(--ink);padding:0 4px;outline:none}
 .in::placeholder{color:#b9b9b4;font-weight:500}
 .in:focus{border-color:var(--ink)}
+.in.auto{color:#8d8d88}
 .chk{width:38px;height:38px;border-radius:19px;border:1.5px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;padding:0}
 .chk svg{width:18px;height:18px;stroke:#fff;fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round;opacity:0}
 .chk.on{background:var(--ink);border-color:var(--ink)}
@@ -371,6 +372,45 @@ function prevSession(e,curDate){
   var pick=before.length?before[before.length-1]:(h.length?h[h.length-1]:null);
   return pick;
 }
+/* Estimación de fuerza (Epley): kg × (1 + (reps + RIR)/30). Se asume que cumpliste el RIR/RPE pedido. */
+function sessionE1rm(id){
+  var ref=findEx(id), L=S.logs[id]; if(!ref||!L||L.skip) return 0;
+  var sets=expandSets(ref.e.spec), vals=[];
+  L.sets.forEach(function(s,i){
+    var t=sets[i], kg=num(s.kg), reps=num(s.reps);
+    if(!t||t.sec||!(kg>0)||!(s.done||reps>0)) return;
+    var rir;
+    if(t.t==='RIR'&&t.v!=null) rir=t.v;
+    else if(t.t==='RPE'&&t.v!=null) rir=10-t.v;
+    else if(t.t==='MAX') rir=0;
+    else return;
+    var r=reps>0?reps:t.reps;
+    vals.push(kg*(1+(r+rir)/30));
+  });
+  if(!vals.length) return 0;
+  vals.sort(function(a,b){return a-b;});
+  var m=Math.floor(vals.length/2);
+  return vals.length%2?vals[m]:(vals[m-1]+vals[m])/2;
+}
+function learnedFor(e,curDate){
+  var past=sessionsOf(nk(e)).filter(function(x){return x.id!==e.id&&x.date<=curDate;});
+  var est=[];
+  for(var i=past.length-1;i>=0&&est.length<3;i--){var v=sessionE1rm(past[i].id);if(v>0) est.push(v);}
+  if(est.length<2) return null;
+  var w=[1,.6,.36], num_=0, den=0;
+  est.forEach(function(v,k){num_+=v*w[k];den+=w[k];});
+  var e1=num_/den, step=/mancuerna/i.test(e.name)?1:2.5;
+  var kgs=expandSets(e.spec).map(function(t){
+    if(t.sec) return 0;
+    var rir;
+    if(t.t==='RIR'&&t.v!=null) rir=t.v;
+    else if(t.t==='RPE'&&t.v!=null) rir=10-t.v;
+    else return 0;
+    var kg=roundTo(e1/(1+(t.reps+rir)/30),step);
+    return kg>0?kg:0;
+  });
+  return {kgs:kgs,n:est.length};
+}
 
 /* ================= graficos ================= */
 function tickFmt(v,range){return range>=6?String(Math.round(v)):fmt(+v.toFixed(1));}
@@ -515,6 +555,7 @@ function vEx(){
   if(!ref){nav={tab:'train',view:'home'};return vHome();}
   var e=ref.e, w=S.routine[ref.wi], d=w.d[ref.di];
   var sets=expandSets(e.spec), L=getLog(e.id,sets.length);
+  var ln=learnedFor(e,L.date);
   var prevS=prevSession(e,L.date), prevL=null, prevTxt='';
   if(prevS){
     prevL=S.logs[prevS.id];
@@ -528,14 +569,15 @@ function vEx(){
   }
   var chips=parseSpec(e.spec)?'<div class="chips">'+summary(e.spec).split(' · ').map(function(x){return '<span class="chip">'+esc(x)+'</span>';}).join('')+'</div>':'';
   var rows=sets.map(function(s,i){
-    var sl=L.sets[i], sg=suggest(e,s);
-    var kgPh = sg?fmt(sg):(prevL&&prevL.sets[i]&&num(prevL.sets[i].kg)>0?fmt(num(prevL.sets[i].kg)):'');
+    var sl=L.sets[i], sg=suggest(e,s)||(ln&&ln.kgs[i])||0;
+    var autoKg=(String(sl.kg)===''&&!sl.done&&ln&&ln.kgs[i]&&!suggest(e,s))?fmt(ln.kgs[i]):'';
+    var kgPh = sg?fmt(sg):'';
     var label=intens(s), top=s.sec?(s.reps+' s'):(s.reps+(s.reps===1?' rep':' reps'));
     var sub=[]; if(label&&s.t!=='MAX') sub.push(label); if(s.t==='MAX') sub.push('Máximo'); if(sg) sub.push('≈ '+fmt(sg)+' kg');
     return '<div class="set'+(sl.done?' isdone':'')+'" data-row="'+i+'">'+
       '<div class="n">'+(i+1)+'</div>'+
       '<div class="tg"><b>'+top+'</b><span>'+esc(sub.join(' · '))+'</span></div>'+
-      '<input class="in" inputmode="decimal" data-f="kg" data-i="'+i+'" value="'+esc(sl.kg)+'" placeholder="'+kgPh+'" aria-label="Kg serie '+(i+1)+'">'+
+      '<input class="in'+(autoKg?' auto':'')+'" inputmode="decimal" data-f="kg" data-i="'+i+'" value="'+esc(sl.kg!==''?sl.kg:autoKg)+'" placeholder="'+kgPh+'" aria-label="Kg serie '+(i+1)+'">'+
       '<input class="in" inputmode="numeric" data-f="reps" data-i="'+i+'" value="'+esc(sl.reps)+'" placeholder="'+s.reps+'" aria-label="'+(s.sec?'Segundos':'Reps')+' serie '+(i+1)+'">'+
       '<button class="chk'+(sl.done?' on':'')+'" data-act="chk" data-i="'+i+'" aria-label="Serie hecha">'+TICK+'</button></div>';
   }).join('');
@@ -546,7 +588,11 @@ function vEx(){
     if(top>0) ormBtn='<button class="btn ghost full" style="margin-top:16px" data-act="use-orm" data-v="'+top+'">Usar '+fmt(top)+' kg como mi 1RM</button>';
   }
   var copyBtn=(prevL&&prevL.note&&!L.note)?'<button class="link" style="padding-left:0" data-act="copy-note">Copiar comentario de la última vez</button>':'';
-  var setsBlock='<div class="sethead"><span>#</span><span>Objetivo</span><span>Kg</span><span>'+(sets[0]&&sets[0].sec?'Seg':'Reps')+'</span><span></span></div>'+rows+ormBtn+
+  var anySg=sets.some(function(x,i){return suggest(e,x)&&!num(L.sets[i].kg);});
+  var anyBlank=anySg;
+  var sgBar=(anySg&&anyBlank)?'<button class="btn ghost full" style="margin-bottom:10px" data-act="fill-suggest">Usar pesos sugeridos</button>':'';
+  var autoNote=(ln&&sets.some(function(x,i){return ln.kgs[i]&&!suggest(e,x);}))?'<p class="fine" style="margin:0 0 14px">Los pesos en gris los calculó la app con tus últimas '+ln.n+' sesiones de este ejercicio. Se guardan cuando tildás la serie o los cambiás. Es una estimación: ajustala según cómo te sientas.</p>':'';
+  var setsBlock=sgBar+autoNote+'<div class="sethead"><span>#</span><span>Objetivo</span><span>Kg</span><span>'+(sets[0]&&sets[0].sec?'Seg':'Reps')+'</span><span></span></div>'+rows+ormBtn+
     '<label class="fl">Comentario</label>'+
     '<textarea class="in" data-f="note" placeholder="'+esc(prevL&&prevL.note?prevL.note:'Máquina, polea, agarre, altura del banco…')+'">'+esc(L.note)+'</textarea>'+copyBtn+
     '<label class="fl">Fecha</label><input class="in left" type="date" data-f="date" value="'+esc(L.date)+'">'+
@@ -666,10 +712,19 @@ document.addEventListener('click',function(ev){
   }
   else if(a==='chk'){
     var i=+t.dataset.i, L=ensureLog(nav.id);
+    if(!L.sets[i].done){
+      var kin=t.closest('.set').querySelector('[data-f=kg]');
+      if(kin&&kin.value&&String(L.sets[i].kg)===''){L.sets[i].kg=kin.value;kin.classList.remove('auto');}
+    }
     L.sets[i].done=!L.sets[i].done; save();
     t.classList.toggle('on',L.sets[i].done);
     t.closest('.set').classList.toggle('isdone',L.sets[i].done);
     refreshCharts();
+  }
+  else if(a==='fill-suggest'){
+    var rf=findEx(nav.id), Lf=ensureLog(nav.id), sf=expandSets(rf.e.spec), lf=learnedFor(rf.e,Lf.date);
+    sf.forEach(function(x,i){var g=suggest(rf.e,x)||(lf&&lf.kgs[i])||0; if(g>0&&!num(Lf.sets[i].kg)) Lf.sets[i].kg=fmt(g);});
+    save();render();
   }
   else if(a==='skip'){var Ls=ensureLog(nav.id);Ls.skip=true;if(!Ls.skipReason)Ls.skipReason='';save();render();}
   else if(a==='unskip'){var Lu=ensureLog(nav.id);Lu.skip=false;delete Lu.skipReason;save();render();}
@@ -707,7 +762,7 @@ document.addEventListener('input',function(ev){
   var t=ev.target, f=t.dataset&&t.dataset.f; if(!f) return;
   if(f==='kg'||f==='reps'){
     var L=ensureLog(nav.id), i=+t.dataset.i;
-    L.sets[i][f]=t.value; save(); refreshCharts();
+    L.sets[i][f]=t.value; if(f==='kg') t.classList.remove('auto'); save(); refreshCharts();
   }else if(f==='skipreason'){
     var L5=ensureLog(nav.id); L5.skipReason=t.value; save();
   }else if(f==='note'){
